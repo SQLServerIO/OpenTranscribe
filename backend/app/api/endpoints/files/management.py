@@ -19,6 +19,7 @@ from app.api.endpoints.files.crud import get_media_file_by_uuid
 from app.db.base import get_db
 from app.models.media import FileStatus
 from app.models.user import User
+from app.services import system_settings_service
 from app.tasks.transcription import transcribe_audio_task
 from app.utils.task_utils import cancel_active_task
 from app.utils.task_utils import check_for_stuck_files
@@ -223,12 +224,15 @@ async def retry_file_processing(
                 detail=f"File cannot be retried in current status: {db_file.status}",
             )
 
-        # Check retry limits
-        if db_file.retry_count >= db_file.max_retries and not reset_retry_count and not is_admin:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File has reached maximum retry attempts ({db_file.max_retries}). Contact admin for help.",
-            )
+        # Check retry limits (unless admin, reset requested, or limits disabled)
+        retry_config = system_settings_service.get_retry_config(db)
+        if not reset_retry_count and not is_admin and retry_config["retry_limit_enabled"]:
+            max_retries = retry_config["max_retries"]
+            if max_retries > 0 and db_file.retry_count >= max_retries:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File has reached maximum retry attempts ({max_retries}). Contact admin for help.",
+                )
 
         # Reset file for retry
         success = reset_file_for_retry(db, file_id, reset_retry_count)
@@ -265,6 +269,56 @@ async def retry_file_processing(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error retrying file processing",
+        ) from e
+
+
+@router.post("/{file_uuid}/reset-retries")
+async def reset_file_retries(
+    file_uuid: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Reset retry count for a file (admin only).
+
+    This endpoint allows administrators to reset the retry count to 0,
+    enabling users to reprocess files that have hit the retry limit.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrators can reset retry counts",
+        )
+
+    try:
+        db_file = get_media_file_by_uuid(db, file_uuid, current_user.id, is_admin=True)
+
+        # Reset retry count
+        old_count = db_file.retry_count
+        db_file.retry_count = 0
+        db.commit()
+        db.refresh(db_file)
+
+        logger.info(
+            f"Admin {current_user.email} reset retry count for file {file_uuid} from {old_count} to 0"
+        )
+
+        return {
+            "message": "Retry count reset successfully",
+            "file_uuid": str(db_file.uuid),
+            "filename": db_file.filename,
+            "old_retry_count": old_count,
+            "new_retry_count": db_file.retry_count,
+            "max_retries": db_file.max_retries,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resetting retries for file {file_uuid}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error resetting file retry count",
         ) from e
 
 

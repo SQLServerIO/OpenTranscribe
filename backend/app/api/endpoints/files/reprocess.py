@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.media import FileStatus
 from app.models.media import MediaFile
 from app.models.user import User
+from app.services import system_settings_service
 from app.tasks.transcription import transcribe_audio_task
 
 logger = logging.getLogger(__name__)
@@ -144,12 +145,15 @@ async def process_file_reprocess(
                 detail="File storage path not found. Cannot reprocess.",
             )
 
-        # Check retry limits (unless admin)
-        if not is_admin and media_file.retry_count >= media_file.max_retries:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File has reached maximum retry attempts ({media_file.max_retries}). Contact admin for help.",
-            )
+        # Check retry limits (unless admin or limits disabled)
+        retry_config = system_settings_service.get_retry_config(db)
+        if not is_admin and retry_config["retry_limit_enabled"]:
+            max_retries = retry_config["max_retries"]
+            if max_retries > 0 and media_file.retry_count >= max_retries:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File has reached maximum retry attempts ({max_retries}). Contact admin for help.",
+                )
 
         logger.info(
             f"Starting reprocessing for file {file_uuid} (id: {file_id}) by user {current_user.email}"

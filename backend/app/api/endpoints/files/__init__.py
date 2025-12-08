@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter
+from fastapi import Body
 from fastapi import Depends
 from fastapi import File
 from fastapi import HTTPException
@@ -32,6 +33,7 @@ from app.models.user import User
 from app.schemas.media import MediaFile as MediaFileSchema
 from app.schemas.media import MediaFileDetail
 from app.schemas.media import MediaFileUpdate
+from app.schemas.media import ReprocessRequest
 from app.schemas.media import TranscriptSegment
 from app.schemas.media import TranscriptSegmentUpdate
 from app.services.formatting_service import FormattingService
@@ -554,21 +556,44 @@ def update_transcript_segment(
 @router.post("/{file_uuid}/reprocess", response_model=MediaFileSchema)
 async def reprocess_media_file(
     file_uuid: str,
-    reprocess_request: Optional["ReprocessRequest"] = None,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Reprocess a media file for transcription with optional speaker diarization settings"""
-    from app.schemas.media import ReprocessRequest
+    import logging
+    logger = logging.getLogger(__name__)
 
-    # Extract speaker parameters from request if provided
-    min_speakers = reprocess_request.min_speakers if reprocess_request else None
-    max_speakers = reprocess_request.max_speakers if reprocess_request else None
-    num_speakers = reprocess_request.num_speakers if reprocess_request else None
+    # Parse body manually to handle empty or missing body
+    min_speakers = None
+    max_speakers = None
+    num_speakers = None
 
-    return await process_file_reprocess(
-        file_uuid, db, current_user, min_speakers, max_speakers, num_speakers
-    )
+    try:
+        body = await request.body()
+        logger.info(f"Reprocess request body: {body}")
+        if body and body.strip():
+            import json
+            data = json.loads(body)
+            min_speakers = data.get("min_speakers")
+            max_speakers = data.get("max_speakers")
+            num_speakers = data.get("num_speakers")
+            logger.info(f"Parsed speaker params: min={min_speakers}, max={max_speakers}, num={num_speakers}")
+    except Exception as e:
+        logger.warning(f"Could not parse reprocess body: {e}")
+
+    try:
+        result = await process_file_reprocess(
+            file_uuid, db, current_user, min_speakers, max_speakers, num_speakers
+        )
+        logger.info(f"Reprocess succeeded for file {file_uuid}")
+        return result
+    except HTTPException as e:
+        logger.error(f"HTTPException during reprocess: status={e.status_code}, detail={e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error during reprocess: {e}")
+        raise
 
 
 @router.delete("/{file_uuid}/cache", status_code=204)

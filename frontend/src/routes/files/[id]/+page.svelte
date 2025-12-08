@@ -22,6 +22,8 @@
   import { isLLMAvailable } from '$stores/llmStatus';
   import { transcriptStore, processedTranscriptSegments } from '$stores/transcriptStore';
   import { getAISuggestions, type TagSuggestion, type CollectionSuggestion } from '$lib/api/suggestions';
+  import { user as userStore } from '$stores/auth';
+  import { AdminSettingsApi } from '$lib/api/adminSettings';
 
   // No need for a global commentsForExport variable - we'll fetch when needed
 
@@ -66,6 +68,7 @@
   let reprocessMinSpeakers: number | null = null;
   let reprocessMaxSpeakers: number | null = null;
   let reprocessNumSpeakers: number | null = null;
+  let resettingRetries = false;
   let summaryData: any = null;
   let showSummaryModal = false;
   let showTranscriptModal = false;
@@ -80,6 +83,10 @@
 
   // LLM availability for summary functionality
   $: llmAvailable = $isLLMAvailable;
+
+  // Admin check for reset retries functionality
+  $: isAdmin = $userStore?.role === 'admin';
+  $: hasReachedRetryLimit = file && file.retry_count !== undefined && file.max_retries !== undefined && file.retry_count >= file.max_retries;
 
   // Detect changes in speaker names - depends on speaker display_name values
   $: speakerNamesChanged = speakerList.length > 0 && speakerList.some(speaker => {
@@ -1508,6 +1515,18 @@
     }
   }
 
+  async function handleSpeakersMerged() {
+    // After speakers are merged, refresh the speaker list and transcript data
+    try {
+      await loadSpeakers();
+      await fetchTranscriptData();
+      toastStore.success('Speakers merged successfully. Transcript updated.');
+    } catch (error) {
+      console.error('Error refreshing after speaker merge:', error);
+      toastStore.error('Speakers merged, but failed to refresh data. Please reload the page.');
+    }
+  }
+
   function handleVideoRetry() {
     fetchFileDetails();
   }
@@ -1644,6 +1663,28 @@
   // Validation for reprocess settings
   $: reprocessSettingsValid = !(reprocessMinSpeakers !== null && reprocessMaxSpeakers !== null && reprocessMinSpeakers > reprocessMaxSpeakers);
 
+  /**
+   * Reset retry count for the file (admin only)
+   */
+  async function handleResetRetries() {
+    if (!file?.id || !isAdmin || resettingRetries) return;
+
+    try {
+      resettingRetries = true;
+      const result = await AdminSettingsApi.resetFileRetries(file.id);
+
+      // Update local file state
+      file.retry_count = result.new_retry_count;
+
+      toastStore.success(`Retry count reset for "${result.filename}"`);
+    } catch (error: any) {
+      console.error('Error resetting retries:', error);
+      const errorMsg = error.response?.data?.detail || 'Failed to reset retry count';
+      toastStore.error(errorMsg);
+    } finally {
+      resettingRetries = false;
+    }
+  }
 
   /**
    * Generate summary for the transcript
@@ -2204,6 +2245,26 @@
               {/if}
             </div>
           {/if}
+          <!-- Admin Reset Retries Button -->
+          {#if isAdmin && hasReachedRetryLimit && file?.status === 'error'}
+            <button
+              class="reset-retries-btn"
+              on:click={handleResetRetries}
+              disabled={resettingRetries}
+              title="Reset retry count to allow reprocessing (Admin)"
+            >
+              {#if resettingRetries}
+                <div class="spinner-small"></div>
+                Resetting...
+              {:else}
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                  <path d="M3 3v5h5"></path>
+                </svg>
+                Reset Retries
+              {/if}
+            </button>
+          {/if}
           </div>
         </div>
 
@@ -2291,6 +2352,7 @@
           on:saveSpeakerNames={handleSaveSpeakerNames}
           on:speakerUpdate={handleSpeakerUpdate}
           on:speakerNameChanged={handleSpeakerNameChanged}
+          on:speakersMerged={handleSpeakersMerged}
           on:reprocess={handleReprocess}
           on:seekToPlayhead={handleSeekTo}
         />
@@ -2503,12 +2565,14 @@
     align-items: center;
     margin-bottom: 0px;
     min-height: 32px;
+    overflow: visible;
   }
 
   .header-buttons {
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    overflow: visible;
   }
 
   .view-transcript-btn {
@@ -2586,22 +2650,63 @@
     flex-shrink: 0;
   }
 
+  .reset-retries-btn {
+    background-color: var(--warning-bg, #f59e0b);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .reset-retries-btn:hover:not(:disabled) {
+    background-color: var(--warning-hover, #d97706);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  }
+
+  .reset-retries-btn:active {
+    transform: scale(0.98);
+  }
+
+  .reset-retries-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+
+  .reset-retries-btn .spinner-small {
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top: 2px solid white;
+    border-radius: 50%;
+    width: 12px;
+    height: 12px;
+    animation: spin 1s linear infinite;
+    flex-shrink: 0;
+  }
+
   .reprocess-dropdown-container {
     position: relative;
+    overflow: visible !important;
   }
 
   .reprocess-settings-dropdown {
     position: absolute;
-    top: 100%;
+    top: calc(100% + 8px);
     right: 0;
-    margin-top: 0.5rem;
     width: 320px;
     padding: 1rem;
-    background-color: var(--card-background);
-    border: 1px solid var(--border-color);
+    background-color: var(--card-background, #1e293b);
+    border: 1px solid var(--border-color, #334155);
     border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    z-index: 100;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+    z-index: 9999;
     animation: slideDown 0.15s ease;
   }
 
