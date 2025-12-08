@@ -70,15 +70,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         if not user.is_active:
             raise HTTPException(status_code=400, detail="Inactive user")
 
-        # If role in token differs from DB, prioritize token's role
-        # This ensures newly granted admin rights take effect immediately
-        if user_role and user.role != user_role:
-            logger.info(
-                f"Updating user {user.id} role from {user.role} to {user_role} based on token"
-            )
-            user.role = user_role
-            db.commit()
-
+        # Database is the source of truth for role - don't overwrite from token
+        # This allows admins to change user roles and have them take effect immediately
+        # (user just needs to refresh their session to get updated role in token)
         return user
     except Exception as e:
         # Handle database connection errors or other issues
