@@ -96,7 +96,7 @@ class LLMService:
             return f"{clean_url}/api/chat"
 
         self.endpoints = {
-            LLMProvider.OPENAI: "https://api.openai.com/v1/chat/completions",
+            LLMProvider.OPENAI: build_endpoint(config.base_url) if config.base_url else "https://api.openai.com/v1/chat/completions",
             LLMProvider.VLLM: build_endpoint(config.base_url) if config.base_url else None,
             LLMProvider.OLLAMA: build_ollama_endpoint(config.base_url)
             if config.base_url
@@ -514,11 +514,41 @@ class LLMService:
             logger.info(f"Processing transcript in {len(transcript_chunks)} sections")
             return self._process_multiple_chunks(transcript_chunks, speaker_data, prompt_template)
 
+    def _safe_format_prompt(self, prompt_template: str, **kwargs) -> str:
+        """
+        Safely format a prompt template, handling unknown placeholders gracefully.
+
+        User custom prompts may contain placeholders like {campaign_context} that
+        the system doesn't know about. Instead of raising KeyError, we replace
+        unknown placeholders with "[Not provided]".
+        """
+        try:
+            # First attempt: normal format with provided kwargs
+            return prompt_template.format(**kwargs)
+        except KeyError as e:
+            # Find all placeholders in the template
+            # Match {placeholder} but not {{escaped}}
+            placeholder_pattern = re.compile(r'\{([^{}]+)\}')
+
+            # Get all unique placeholder names
+            placeholders = set(placeholder_pattern.findall(prompt_template))
+
+            # Build a dict with all placeholders, using provided values or "[Not provided]"
+            format_dict = {p: kwargs.get(p, "[Not provided]") for p in placeholders}
+
+            # Log which placeholders were missing
+            missing = [p for p in placeholders if p not in kwargs]
+            if missing:
+                logger.warning(f"Prompt template has unknown placeholders: {missing}")
+
+            return prompt_template.format(**format_dict)
+
     def _process_single_chunk(
         self, transcript: str, speaker_data: dict, prompt_template: str
     ) -> dict[str, Any]:
         """Process single transcript chunk"""
-        formatted_prompt = prompt_template.format(
+        formatted_prompt = self._safe_format_prompt(
+            prompt_template,
             transcript=transcript,
             speaker_data=json.dumps(speaker_data or {}, indent=2),
         )
@@ -574,7 +604,8 @@ class LLMService:
         prompt_template: str,
     ) -> dict[str, Any]:
         """Summarize a single section"""
-        formatted_prompt = prompt_template.format(
+        formatted_prompt = self._safe_format_prompt(
+            prompt_template,
             transcript=chunk,
             speaker_data=json.dumps(speaker_data or {}, indent=2),
         )
@@ -616,7 +647,8 @@ class LLMService:
         """Combine multiple section summaries into final summary"""
         combined_content = f"SECTION SUMMARIES TO COMBINE:\n{json.dumps(sections, indent=2)}"
 
-        formatted_prompt = prompt_template.format(
+        formatted_prompt = self._safe_format_prompt(
+            prompt_template,
             transcript=combined_content,
             speaker_data=json.dumps(speaker_data or {}, indent=2),
         )
